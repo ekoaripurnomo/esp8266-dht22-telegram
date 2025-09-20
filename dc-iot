@@ -1,0 +1,406 @@
+/*
+ * Wemos D1 R2 ESP8266 with DHT22 Sensor
+ * Tests LED, Analog Pin, Serial Communication, WiFi, Internet Connection, and DHT22
+ * Added Telegram notification functionality
+ */
+
+#include <ESP8266WiFi.h>
+#include <WiFiClientSecure.h>
+#include <UniversalTelegramBot.h>
+#include <DHT.h>  // Use the standard DHT library
+
+// Define pins for Wemos D1 R2
+#define BUILTIN_LED 2     // GPIO2 - Built-in LED (Active LOW)
+#define ANALOG_PIN A0     // The only analog input
+#define DHT_PIN D3        // GPIO2 - DHT22 data pin (D0 on Wemos D1 R2)
+
+// Define DHT sensor type
+#define DHT_TYPE DHT22
+
+// WiFi settings
+const char* ssid = "WIFI";     // Your WiFi SSID
+const char* password = "password"; // Your WiFi password
+
+// Internet test settings
+const char* host = "www.google.com"; // Host to test internet connection
+const int httpPort = 80;
+
+// Telegram Bot Settings
+#define BOT_TOKEN "your:token"  // Your Bot Token (Get from BotFather)
+#define CHAT_ID "chat-id"  // Your Chat ID (Get from IDBot or similar)
+
+// Initialize Telegram Bot
+WiFiClientSecure secured_client;
+UniversalTelegramBot bot(BOT_TOKEN, secured_client);
+
+// Initialize DHT sensor
+DHT dht(DHT_PIN, DHT_TYPE);
+
+// Variables for timing
+unsigned long lastDHTRead = 0;
+const unsigned long DHT_READ_INTERVAL = 30000; // Read DHT every 30 seconds
+unsigned long lastTelegramSend = 0;
+const unsigned long TELEGRAM_SEND_INTERVAL = 300000; // Send to Telegram every 5 minutes (300000 ms)
+bool firstBoot = true;
+bool telegramSendFlag = false;
+
+void setup() {
+  // Initialize hardware
+  pinMode(BUILTIN_LED, OUTPUT);
+  pinMode(ANALOG_PIN, INPUT);
+  
+  // Start Serial communication
+  Serial.begin(115200);
+  while (!Serial) {
+    ; // wait for serial port to connect
+  }
+  
+  Serial.println("\n");
+  Serial.println("===================================");
+  Serial.println("Wemos D1 R2 ESP8266 with DHT22 Test");
+  Serial.println("===================================");
+  
+  // Initialize DHT sensor
+  dht.begin();
+  Serial.println("DHT22 sensor initialized");
+  
+  // Test 1: Blink LED 3 times
+  Serial.println("\n1. Testing Built-in LED (GPIO2)...");
+  for (int i = 0; i < 3; i++) {
+    digitalWrite(BUILTIN_LED, LOW);  // Turn LED ON (active LOW)
+    delay(300);
+    digitalWrite(BUILTIN_LED, HIGH); // Turn LED OFF
+    delay(300);
+  }
+  Serial.println("LED test complete!");
+
+  // Test 2: Read analog pin
+  Serial.println("\n2. Testing Analog Input (A0)...");
+  int analogValue = analogRead(ANALOG_PIN);
+  Serial.print("Analog Read (A0): ");
+  Serial.println(analogValue);
+  Serial.print("Voltage: ");
+  Serial.print((analogValue / 1024.0) * 3.3); // ESP8266 has 3.3V reference
+  Serial.println("V");
+
+  // Test 3: Show chip information
+  Serial.println("\n3. Board Information:");
+  Serial.print("Chip ID: ");
+  Serial.println(ESP.getChipId(), HEX);
+  Serial.print("Flash Chip ID: ");
+  Serial.println(ESP.getFlashChipId(), HEX);
+  Serial.print("CPU Frequency: ");
+  Serial.print(ESP.getCpuFreqMHz());
+  Serial.println(" MHz");
+  Serial.print("Free Heap: ");
+  Serial.print(ESP.getFreeHeap());
+  Serial.println(" bytes");
+
+  // Test 4: WiFi Scan (doesn't require password)
+  Serial.println("\n4. Testing WiFi...");
+  WiFi.mode(WIFI_STA);
+  WiFi.disconnect();
+  delay(100);
+
+  Serial.println("Scanning available networks...");
+  int n = WiFi.scanNetworks();
+  Serial.println("Scan complete");
+  
+  if (n == 0) {
+    Serial.println("No networks found");
+  } else {
+    Serial.print(n);
+    Serial.println(" networks found:");
+    for (int i = 0; i < n; ++i) {
+      Serial.print(i + 1);
+      Serial.print(": ");
+      Serial.print(WiFi.SSID(i));
+      Serial.print(" (");
+      Serial.print(WiFi.RSSI(i));
+      Serial.print(" dBm) ");
+      Serial.println((WiFi.encryptionType(i) == ENC_TYPE_NONE) ? "Open" : "Secured");
+      delay(10);
+    }
+  }
+
+  // Test 5: Connect to WiFi and test internet connection
+  Serial.println("\n5. Connecting to WiFi and testing internet...");
+  WiFi.begin(ssid, password);
+  
+  int wifiTimeout = 20; // 20 * 500ms = 10 seconds timeout
+  while (WiFi.status() != WL_CONNECTED && wifiTimeout > 0) {
+    delay(500);
+    Serial.print(".");
+    wifiTimeout--;
+  }
+  
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("\nWiFi connected!");
+    Serial.print("IP address: ");
+    Serial.println(WiFi.localIP());
+    
+    // Initialize Telegram Bot
+    secured_client.setInsecure(); // For simple TLS connection
+    sendTelegramMessage("🔌 ESP8266 System Booted!\n"
+                        "✅ WiFi Connected\n"
+                        "📶 RSSI: " + String(WiFi.RSSI()) + " dBm\n"
+                        "🌐 IP: " + WiFi.localIP().toString());
+    
+    // Test internet connection
+    Serial.print("Testing internet connection to ");
+    Serial.print(host);
+    Serial.print("...");
+    
+    WiFiClient client;
+    if (!client.connect(host, httpPort)) {
+      Serial.println(" failed");
+      sendTelegramMessage("❌ Internet connection test failed!");
+    } else {
+      Serial.println(" success!");
+      sendTelegramMessage("✅ Internet connection test successful!");
+      
+      // Send a simple HTTP request
+      client.print(String("GET / HTTP/1.1\r\n") +
+                   "Host: " + host + "\r\n" +
+                   "Connection: close\r\n\r\n");
+      
+      // Wait for response with timeout
+      unsigned long timeout = millis();
+      while (client.available() == 0) {
+        if (millis() - timeout > 5000) {
+          Serial.println(">>> Client Timeout !");
+          client.stop();
+          break;
+        }
+      }
+      
+      // Read response
+      while (client.available()) {
+        String line = client.readStringUntil('\r');
+        // Just read the first line of response to confirm connection
+        if (line.startsWith("HTTP/")) {
+          Serial.print("Server response: ");
+          Serial.println(line);
+          break;
+        }
+      }
+      client.stop();
+    }
+  } else {
+    Serial.println("\nFailed to connect to WiFi!");
+  }
+
+  Serial.println("\n6. Board is ready! Press reset to run test again.");
+  Serial.println("===================================");
+}
+
+void loop() {
+  // Slow blink to show the board is alive
+  digitalWrite(BUILTIN_LED, LOW);
+  delay(1000);
+  digitalWrite(BUILTIN_LED, HIGH);
+  delay(1000);
+  
+  // Read and display DHT22 sensor data periodically
+  if (millis() - lastDHTRead > DHT_READ_INTERVAL) {
+    lastDHTRead = millis();
+    readDHT22();
+  }
+  
+  // Send temperature and humidity to Telegram every 5 minutes
+  // Using proper millis() overflow handling
+  unsigned long currentMillis = millis();
+  if (currentMillis - lastTelegramSend >= TELEGRAM_SEND_INTERVAL) {
+    lastTelegramSend = currentMillis;
+    sendSensorDataToTelegram();
+  }
+  
+  // Periodically show analog value
+  int analogValue = analogRead(ANALOG_PIN);
+  Serial.print("Analog Value: ");
+  Serial.println(analogValue);
+  
+  // Check for Telegram messages
+  if (WiFi.status() == WL_CONNECTED) {
+    int numNewMessages = bot.getUpdates(bot.last_message_received + 1);
+    
+    while (numNewMessages) {
+      Serial.println("Got response");
+      handleNewMessages(numNewMessages);
+      numNewMessages = bot.getUpdates(bot.last_message_received + 1);
+    }
+    
+    // Show WiFi status if connected
+    Serial.print("WiFi Connected. RSSI: ");
+    Serial.print(WiFi.RSSI());
+    Serial.println(" dBm");
+    
+    // Periodically test internet connection (every 30 seconds)
+    static unsigned long lastInternetTest = 0;
+    if (currentMillis - lastInternetTest > 30000) {
+      lastInternetTest = currentMillis;
+      
+      WiFiClient client;
+      if (client.connect(host, httpPort)) {
+        Serial.println("Internet connection: OK");
+        client.stop();
+      } else {
+        Serial.println("Internet connection: FAILED");
+        sendTelegramMessage("❌ Internet connection lost!");
+      }
+    }
+  }
+  
+  // Wait 2 seconds between readings
+  delay(2000);
+}
+
+void readDHT22() {
+  // Reading temperature or humidity takes about 250 milliseconds!
+  // Sensor readings may also be up to 2 seconds 'old' (its a very slow sensor)
+  
+  // Read temperature as Celsius (the default)
+  float temperature = dht.readTemperature();
+  // Read temperature as Fahrenheit (isFahrenheit = true)
+  float fahrenheit = dht.readTemperature(true);
+  // Read humidity
+  float humidity = dht.readHumidity();
+  
+  // Check if any reads failed and exit early (to try again)
+  if (isnan(humidity) || isnan(temperature) || isnan(fahrenheit)) {
+    Serial.println("Failed to read from DHT sensor!");
+    sendTelegramMessage("❌ Failed to read from DHT22 sensor!");
+    return;
+  }
+  
+  // Compute heat index in Fahrenheit (the default)
+  float heatIndexF = dht.computeHeatIndex(fahrenheit, humidity);
+  // Compute heat index in Celsius (isFahreheit = false)
+  float heatIndexC = dht.computeHeatIndex(temperature, humidity, false);
+  
+  Serial.println("=== DHT22 Readings ===");
+  Serial.print("Humidity: ");
+  Serial.print(humidity);
+  Serial.println(" %");
+  Serial.print("Temperature: ");
+  Serial.print(temperature);
+  Serial.print(" °C | ");
+  Serial.print(fahrenheit);
+  Serial.println(" °F");
+  Serial.print("Heat index: ");
+  Serial.print(heatIndexC);
+  Serial.print(" °C | ");
+  Serial.print(heatIndexF);
+  Serial.println(" °F");
+  Serial.println("======================");
+  
+  // Send Telegram notification if temperature or humidity exceeds thresholds
+  if (temperature > 40.0) {
+    sendTelegramMessage("🌡️ High Temperature Alert!\n"
+                        "Temperature: " + String(temperature) + "°C\n"
+                        "Humidity: " + String(humidity) + "%");
+  }
+  
+  if (humidity > 80.0) {
+    sendTelegramMessage("💧 High Humidity Alert!\n"
+                        "Humidity: " + String(humidity) + "%\n"
+                        "Temperature: " + String(temperature) + "°C");
+  }
+}
+
+// Function to send sensor data to Telegram every 5 minutes
+void sendSensorDataToTelegram() {
+  // Read current sensor values
+  float temperature = dht.readTemperature();
+  float humidity = dht.readHumidity();
+  float fahrenheit = dht.readTemperature(true);
+  float heatIndexC = dht.computeHeatIndex(temperature, humidity, false);
+  
+  if (isnan(humidity) || isnan(temperature)) {
+    sendTelegramMessage("❌ Failed to read sensor data for scheduled update!");
+    return;
+  }
+  
+  String message = "📊 Scheduled Sensor Update (Every 5 Minutes)\n";
+  message += "🌡️ Temperature: " + String(temperature) + "°C / " + String(fahrenheit) + "°F\n";
+  message += "💧 Humidity: " + String(humidity) + "%\n";
+  message += "🔥 Heat Index: " + String(heatIndexC) + "°C\n";
+  message += "📶 WiFi RSSI: " + String(WiFi.RSSI()) + " dBm";
+  
+  sendTelegramMessage(message);
+  
+  // Debug output to Serial
+  Serial.println("Telegram message sent at: " + String(millis() / 1000) + " seconds");
+}
+
+// Function to send Telegram message
+void sendTelegramMessage(String message) {
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("Attempting to send Telegram message: " + message.substring(0, 30) + "...");
+    if (bot.sendMessage(CHAT_ID, message, "")) {
+      Serial.println("Telegram message sent successfully");
+    } else {
+      Serial.println("Failed to send Telegram message");
+    }
+  } else {
+    Serial.println("Cannot send Telegram message - WiFi not connected");
+  }
+}
+
+// Handle incoming Telegram messages
+void handleNewMessages(int numNewMessages) {
+  Serial.println("handleNewMessages");
+  Serial.println(String(numNewMessages));
+  
+  for (int i = 0; i < numNewMessages; i++) {
+    String chat_id = String(bot.messages[i].chat_id);
+    if (chat_id != CHAT_ID) {
+      bot.sendMessage(chat_id, "Unauthorized user", "");
+      continue;
+    }
+    
+    String text = bot.messages[i].text;
+    Serial.println(text);
+    
+    String from_name = bot.messages[i].from_name;
+    
+    if (text == "/start") {
+      String welcome = "Welcome, " + from_name + "!\n";
+      welcome += "I am ESP8266 DHT22 Monitoring Bot.\n\n";
+      welcome += "/status : Get current sensor readings\n";
+      welcome += "/info : Get system information\n";
+      welcome += "/reading : Get immediate sensor reading\n";
+      bot.sendMessage(chat_id, welcome, "");
+    }
+    
+    if (text == "/status" || text == "/reading") {
+      // Read current sensor values
+      float temperature = dht.readTemperature();
+      float humidity = dht.readHumidity();
+      float fahrenheit = dht.readTemperature(true);
+      float heatIndexC = dht.computeHeatIndex(temperature, humidity, false);
+      
+      if (isnan(humidity) || isnan(temperature)) {
+        bot.sendMessage(chat_id, "Failed to read from DHT sensor!", "");
+      } else {
+        String message = "📊 Current Sensor Readings:\n";
+        message += "🌡️ Temperature: " + String(temperature) + "°C / " + String(fahrenheit) + "°F\n";
+        message += "💧 Humidity: " + String(humidity) + "%\n";
+        message += "🔥 Heat Index: " + String(heatIndexC) + "°C\n";
+        message += "📶 WiFi RSSI: " + String(WiFi.RSSI()) + " dBm\n";
+        message += "🌐 IP: " + WiFi.localIP().toString();
+        bot.sendMessage(chat_id, message, "");
+      }
+    }
+    
+    if (text == "/info") {
+      String info = "🖥️ System Information:\n";
+      info += "Chip ID: " + String(ESP.getChipId(), HEX) + "\n";
+      info += "CPU Freq: " + String(ESP.getCpuFreqMHz()) + " MHz\n";
+      info += "Free Heap: " + String(ESP.getFreeHeap()) + " bytes\n";
+      info += "Sketch Size: " + String(ESP.getSketchSize()) + " bytes\n";
+      info += "Free Sketch Space: " + String(ESP.getFreeSketchSpace()) + " bytes";
+      bot.sendMessage(chat_id, info, "");
+    }
+  }
+}
